@@ -1183,10 +1183,14 @@ fun MineGame(onBack: () -> Unit) {
         }
         val nums = Array(GS) { r -> IntArray(GS) { c ->
             if (mines[r][c]) -1
-            else (-1..1).sumOf { dr -> (-1..1).sumOf { dc ->
-                val nr = r + dr; val nc = c + dc
-                if (nr in 0 until GS && nc in 0 until GS && mines[nr][nc]) 1 else 0
-            } }
+            else {
+                var count = 0
+                for (dr in -1..1) for (dc in -1..1) {
+                    val nr = r + dr; val nc = c + dc
+                    if (nr in 0 until GS && nc in 0 until GS && mines[nr][nc]) count++
+                }
+                count
+            }
         } }
         return mines to nums
     }
