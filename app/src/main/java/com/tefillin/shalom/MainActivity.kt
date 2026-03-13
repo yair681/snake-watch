@@ -22,20 +22,20 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
-// ⬇️ שנה לכתובת השרת שלך
 const val SERVER_URL = "https://whatsapp-watch-server.onrender.com"
 
-val WA_GREEN  = Color(0xFF25D366)
-val WA_DARK   = Color(0xFF075E54)
-val BG_COLOR  = Color(0xFF0A0A0A)
-val CARD_COLOR= Color(0xFF1A1A1A)
-val WHITE     = Color(0xFFFFFFFF)
-val GRAY      = Color(0xFF8696A0)
+val WA_GREEN   = Color(0xFF25D366)
+val BG_COLOR   = Color(0xFF0A0A0A)
+val CARD_COLOR = Color(0xFF1A1A1A)
+val WHITE      = Color(0xFFFFFFFF)
+val GRAY       = Color(0xFF8696A0)
 
 sealed class AppScreen {
     object Loading : AppScreen()
@@ -55,8 +55,8 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-fun fetchJson(path: String): JSONObject? {
-    return try {
+suspend fun fetchJson(path: String): JSONObject? = withContext(Dispatchers.IO) {
+    try {
         val url = URL("$SERVER_URL$path")
         val conn = url.openConnection() as HttpURLConnection
         conn.connectTimeout = 8000
@@ -66,8 +66,8 @@ fun fetchJson(path: String): JSONObject? {
     } catch (e: Exception) { null }
 }
 
-fun postJson(path: String, body: JSONObject): Boolean {
-    return try {
+suspend fun postJson(path: String, body: JSONObject): Boolean = withContext(Dispatchers.IO) {
+    try {
         val url = URL("$SERVER_URL$path")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
@@ -83,18 +83,12 @@ fun postJson(path: String, body: JSONObject): Boolean {
 fun WhatsAppWatchApp() {
     var screen by remember { mutableStateOf<AppScreen>(AppScreen.Loading) }
 
-    // לולאת בדיקה כל 3 שניות
     LaunchedEffect(Unit) {
         while (true) {
-            val current = screen
-            if (current is AppScreen.Reply) {
-                delay(3000)
-                continue
-            }
+            if (screen is AppScreen.Reply) { delay(3000); continue }
             val status = fetchJson("/status")
             if (status != null) {
-                val ready = status.optBoolean("ready", false)
-                if (ready) {
+                if (status.optBoolean("ready", false)) {
                     val msgs = fetchJson("/messages")
                     val list = mutableListOf<MsgItem>()
                     if (msgs != null) {
@@ -113,12 +107,7 @@ fun WhatsAppWatchApp() {
                     }
                     screen = AppScreen.Messages(list)
                 } else {
-                    val qrData = fetchJson("/qr")
-                    if (qrData != null && qrData.has("qr")) {
-                        screen = AppScreen.QR
-                    } else {
-                        screen = AppScreen.Loading
-                    }
+                    screen = AppScreen.QR
                 }
             } else {
                 screen = AppScreen.Loading
@@ -139,7 +128,6 @@ fun WhatsAppWatchApp() {
     }
 }
 
-// ===== מסך טעינה =====
 @Composable
 fun LoadingScreen() {
     Box(Modifier.fillMaxSize().background(BG_COLOR), contentAlignment = Alignment.Center) {
@@ -151,7 +139,6 @@ fun LoadingScreen() {
     }
 }
 
-// ===== מסך QR =====
 @Composable
 fun QRScreen() {
     var qrBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
@@ -174,11 +161,7 @@ fun QRScreen() {
             Spacer(Modifier.height(4.dp))
             val bmp = qrBitmap
             if (bmp != null) {
-                Image(
-                    bitmap = bmp.asImageBitmap(),
-                    contentDescription = "QR",
-                    modifier = Modifier.size(130.dp)
-                )
+                Image(bitmap = bmp.asImageBitmap(), contentDescription = "QR", modifier = Modifier.size(130.dp))
             } else {
                 CircularProgressIndicator(indicatorColor = WA_GREEN, modifier = Modifier.size(40.dp))
                 Spacer(Modifier.height(4.dp))
@@ -188,7 +171,6 @@ fun QRScreen() {
     }
 }
 
-// ===== מסך הודעות =====
 @Composable
 fun MessagesScreen(msgs: List<MsgItem>, onReply: (String, String) -> Unit) {
     Box(Modifier.fillMaxSize().background(BG_COLOR)) {
@@ -208,105 +190,77 @@ fun MessagesScreen(msgs: List<MsgItem>, onReply: (String, String) -> Unit) {
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
                 item {
-                    Text(
-                        "💬 הודעות",
-                        color = WA_GREEN,
-                        fontSize = 12.sp,
+                    Text("💬 הודעות", color = WA_GREEN, fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
-                        textAlign = TextAlign.Center
-                    )
+                        textAlign = TextAlign.Center)
                 }
                 items(msgs) { msg ->
-                    MessageCard(msg) { onReply(msg.number, msg.from) }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(CARD_COLOR, shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                            .clickable { onReply(msg.number, msg.from) }
+                            .padding(8.dp)
+                    ) {
+                        Column {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(msg.from, color = WA_GREEN, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Text(msg.time, color = GRAY, fontSize = 10.sp)
+                            }
+                            Spacer(Modifier.height(2.dp))
+                            Text(msg.body, color = WHITE, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Spacer(Modifier.height(4.dp))
+                            Text("לחץ להשב", color = GRAY, fontSize = 9.sp)
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-@Composable
-fun MessageCard(msg: MsgItem, onReply: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(CARD_COLOR, shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
-            .clickable { onReply() }
-            .padding(8.dp)
-    ) {
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(msg.from, color = WA_GREEN, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Text(msg.time, color = GRAY, fontSize = 10.sp)
-            }
-            Spacer(Modifier.height(2.dp))
-            Text(
-                msg.body,
-                color = WHITE,
-                fontSize = 11.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(4.dp))
-            Text("לחץ להשב", color = GRAY, fontSize = 9.sp)
-        }
-    }
-}
-
-// ===== מסך תגובה =====
 @Composable
 fun ReplyScreen(number: String, name: String, onDone: () -> Unit) {
     var sent by remember { mutableStateOf(false) }
 
-    Box(Modifier.fillMaxSize().background(BG_COLOR)) {
-        if (sent) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("✅", fontSize = 30.sp)
-                    Text("נשלח!", color = WA_GREEN, fontSize = 14.sp)
+    if (sent) {
+        Box(Modifier.fillMaxSize().background(BG_COLOR), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("✅", fontSize = 30.sp)
+                Text("נשלח!", color = WA_GREEN, fontSize = 14.sp)
+            }
+        }
+        LaunchedEffect(Unit) { delay(1500); onDone() }
+    } else {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            contentPadding = PaddingValues(vertical = 8.dp)
+        ) {
+            item {
+                Text("השב ל-$name", color = WA_GREEN, fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+            }
+            items(QUICK_REPLIES) { reply ->
+                Button(
+                    onClick = {
+                        sent = true
+                        val body = JSONObject().put("number", number).put("text", reply)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(34.dp),
+                    colors = ButtonDefaults.buttonColors(backgroundColor = CARD_COLOR)
+                ) {
+                    Text(reply, color = WHITE, fontSize = 12.sp)
                 }
             }
-            LaunchedEffect(Unit) { delay(1500); onDone() }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                item {
-                    Text(
-                        "השב ל-$name",
-                        color = WA_GREEN,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center
-                    )
-                }
-                items(QUICK_REPLIES) { reply ->
-                    Button(
-                        onClick = {
-                            sent = true
-                            val body = JSONObject().put("number", number).put("text", reply)
-                            postJson("/reply", body)
-                        },
-                        modifier = Modifier.fillMaxWidth().height(34.dp),
-                        colors = ButtonDefaults.buttonColors(backgroundColor = CARD_COLOR)
-                    ) {
-                        Text(reply, color = WHITE, fontSize = 12.sp)
-                    }
-                }
-                item {
-                    Button(
-                        onClick = onDone,
-                        modifier = Modifier.fillMaxWidth().height(34.dp),
-                        colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF333333))
-                    ) {
-                        Text("ביטול", color = GRAY, fontSize = 12.sp)
-                    }
+            item {
+                Button(onClick = onDone,
+                    modifier = Modifier.fillMaxWidth().height(34.dp),
+                    colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF333333))
+                ) {
+                    Text("ביטול", color = GRAY, fontSize = 12.sp)
                 }
             }
         }
