@@ -11,6 +11,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
@@ -29,7 +30,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material.*
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.*
+import okhttp3.*
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.random.Random
 
@@ -45,6 +49,10 @@ val CARD_BG  = Color(0xFF16162A)
 val GRAY     = Color(0xFF8E8E93)
 val NEON_COLORS = listOf(NEON_RED, NEON_BLU, NEON_GRN, NEON_YLW, NEON_PRP, NEON_ORG)
 
+// ---- SERVER ----
+const val SERVER_WS   = "wss://chat-vasl.onrender.com"
+
+// ---- SCREENS ----
 sealed class Screen {
     object Splash   : Screen()
     object Menu     : Screen()
@@ -53,6 +61,7 @@ sealed class Screen {
     object Brick    : Screen()
     object Memory   : Screen()
     object Reaction : Screen()
+    object Chat     : Screen()
 }
 
 data class GameInfo(val emoji: String, val name: String, val color: Color, val screen: Screen)
@@ -63,6 +72,7 @@ val GAMES = listOf(
     GameInfo("B", "Brick",      NEON_BLU, Screen.Brick),
     GameInfo("M", "Memory",     NEON_PRP, Screen.Memory),
     GameInfo("R", "Reaction",   NEON_ORG, Screen.Reaction),
+    GameInfo("C", "WatchChat",  NEON_BLU, Screen.Chat),
 )
 
 class MainActivity : ComponentActivity() {
@@ -70,6 +80,23 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent { GameHubApp() }
     }
+}
+
+// ---- CHAT DATA ----
+data class ChatMessage(val from: String, val content: String, val isMine: Boolean)
+val QUICK_REPLIES = listOf("OK", "On my way", "Call me", "Later", "Yes", "No", "Where are you?", "5 min")
+val LETTERS = listOf("A","B","C","D","E","F","G","H","I","J","K","L","M",
+    "N","O","P","Q","R","S","T","U","V","W","X","Y","Z","0","1","2","3","4","5","6","7","8","9")
+
+object ChatState {
+    var ws: WebSocket? = null
+    var myUsername: String = ""
+    var roomCode: String = ""
+    val messages = mutableStateListOf<ChatMessage>()
+    var partnerOnline = mutableStateOf(false)
+    var partnerName = mutableStateOf("")
+    var isTyping = mutableStateOf(false)
+    var connected = mutableStateOf(false)
 }
 
 @Composable
@@ -83,6 +110,7 @@ fun GameHubApp() {
         Screen.Brick    -> BrickGame      { screen = Screen.Menu }
         Screen.Memory   -> MemoryGame     { screen = Screen.Menu }
         Screen.Reaction -> ReactionGame   { screen = Screen.Menu }
+        Screen.Chat     -> ChatFlowScreen { screen = Screen.Menu }
     }
 }
 
@@ -179,7 +207,12 @@ fun MenuScreen(onSelect: (Screen) -> Unit) {
                         ) {
                             Text(game.emoji, color = game.color, fontSize = 16.sp, fontWeight = FontWeight.Black)
                         }
-                        Text(game.name, color = game.color, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Column {
+                            Text(game.name, color = game.color, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            if (game.screen == Screen.Chat && ChatState.connected.value) {
+                                Text("online", color = NEON_GRN, fontSize = 9.sp)
+                            }
+                        }
                     }
                 }
             }
@@ -190,6 +223,264 @@ fun MenuScreen(onSelect: (Screen) -> Unit) {
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth()
                 )
+            }
+        }
+    }
+}
+
+// ==================== WATCHCHAT ====================
+enum class ChatScreen { LOGIN, LOBBY, CHAT }
+
+@Composable
+fun ChatFlowScreen(onBack: () -> Unit) {
+    var chatScreen by remember { mutableStateOf(
+        if (ChatState.connected.value) ChatScreen.LOBBY else ChatScreen.LOGIN
+    )}
+    val scope = rememberCoroutineScope()
+
+    fun connectWS(username: String, roomCode: String) {
+        val client = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
+        val request = Request.Builder().url(SERVER_WS).build()
+        val ws = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                val msg = JSONObject()
+                msg.put("type", "join_room")
+                msg.put("username", username)
+                msg.put("room", roomCode)
+                webSocket.send(msg.toString())
+            }
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                scope.launch(Dispatchers.Main) {
+                    try {
+                        val json = JSONObject(text)
+                        when (json.getString("type")) {
+                            "joined" -> { ChatState.connected.value = true; chatScreen = ChatScreen.LOBBY }
+                            "partner_joined" -> {
+                                ChatState.partnerOnline.value = true
+                                ChatState.partnerName.value = json.getString("username")
+                                chatScreen = ChatScreen.CHAT
+                            }
+                            "partner_left" -> {
+                                ChatState.partnerOnline.value = false
+                                ChatState.partnerName.value = ""
+                                chatScreen = ChatScreen.LOBBY
+                            }
+                            "message" -> {
+                                val from = json.getString("from")
+                                ChatState.messages.add(ChatMessage(from, json.getString("content"), from == username))
+                            }
+                            "typing" -> { ChatState.isTyping.value = json.getBoolean("isTyping") }
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                scope.launch(Dispatchers.Main) { ChatState.connected.value = false; chatScreen = ChatScreen.LOGIN }
+            }
+        })
+        ChatState.ws = ws
+    }
+
+    when (chatScreen) {
+        ChatScreen.LOGIN -> ChatLoginScreen(
+            onJoin = { username, code ->
+                ChatState.myUsername = username
+                ChatState.roomCode = code
+                ChatState.messages.clear()
+                connectWS(username, code)
+            },
+            onBack = onBack
+        )
+        ChatScreen.LOBBY -> ChatLobbyScreen(
+            roomCode = ChatState.roomCode,
+            partnerOnline = ChatState.partnerOnline.value,
+            partnerName = ChatState.partnerName.value,
+            onChat = { chatScreen = ChatScreen.CHAT },
+            onBack = { ChatState.ws?.close(1000, "bye"); ChatState.connected.value = false; onBack() }
+        )
+        ChatScreen.CHAT -> ChatRoomScreen(
+            myUsername = ChatState.myUsername,
+            partnerName = ChatState.partnerName.value,
+            messages = ChatState.messages,
+            isTyping = ChatState.isTyping.value,
+            onSend = { content -> val m = JSONObject(); m.put("type","message"); m.put("content",content); ChatState.ws?.send(m.toString()) },
+            onTyping = { t -> val m = JSONObject(); m.put("type","typing"); m.put("isTyping",t); ChatState.ws?.send(m.toString()) },
+            onBack = { chatScreen = ChatScreen.LOBBY }
+        )
+    }
+}
+
+@Composable
+fun ChatLoginScreen(onJoin: (String, String) -> Unit, onBack: () -> Unit) {
+    var step by remember { mutableStateOf(0) }
+    var username by remember { mutableStateOf("") }
+    var roomCode by remember { mutableStateOf("") }
+    var letterIdx by remember { mutableStateOf(0) }
+    var codeIdx by remember { mutableStateOf(0) }
+
+    Column(
+        modifier = Modifier.fillMaxSize().background(BG).padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        if (step == 0) {
+            Text("WatchChat", color = NEON_BLU, fontSize = 15.sp, fontWeight = FontWeight.Black)
+            Spacer(Modifier.height(6.dp))
+            Text("Your name:", color = GRAY, fontSize = 10.sp)
+            Text(if (username.isEmpty()) "_" else username, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text("< " + LETTERS[letterIdx] + " >", color = NEON_GRN, fontSize = 18.sp,
+                modifier = Modifier.clickable { letterIdx = (letterIdx + 1) % LETTERS.size })
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Button(onClick = { if (username.length < 10) username += LETTERS[letterIdx] },
+                    colors = ButtonDefaults.buttonColors(backgroundColor = CARD_BG),
+                    modifier = Modifier.size(52.dp, 30.dp)) { Text("Add", fontSize = 10.sp, color = NEON_GRN) }
+                Button(onClick = { if (username.isNotEmpty()) username = username.dropLast(1) },
+                    colors = ButtonDefaults.buttonColors(backgroundColor = CARD_BG),
+                    modifier = Modifier.size(52.dp, 30.dp)) { Text("Del", fontSize = 10.sp, color = NEON_RED) }
+            }
+            Spacer(Modifier.height(4.dp))
+            if (username.length >= 2) {
+                Button(onClick = { step = 1 },
+                    colors = ButtonDefaults.buttonColors(backgroundColor = NEON_BLU),
+                    modifier = Modifier.fillMaxWidth(0.65f).height(32.dp)) {
+                    Text("Next", fontSize = 12.sp, color = BG, fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text("< back", color = GRAY, fontSize = 9.sp, modifier = Modifier.clickable { onBack() })
+        } else {
+            Text("Room Code", color = NEON_PRP, fontSize = 14.sp, fontWeight = FontWeight.Black)
+            Spacer(Modifier.height(2.dp))
+            Text("Enter code from friend\nor type new code:", color = GRAY, fontSize = 9.sp, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(6.dp))
+            Text("< " + LETTERS[codeIdx] + " >", color = NEON_YLW, fontSize = 18.sp,
+                modifier = Modifier.clickable { codeIdx = (codeIdx + 1) % LETTERS.size })
+            Text(if (roomCode.isEmpty()) "_" else roomCode, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Button(onClick = { if (roomCode.length < 6) roomCode += LETTERS[codeIdx] },
+                    colors = ButtonDefaults.buttonColors(backgroundColor = CARD_BG),
+                    modifier = Modifier.size(52.dp, 30.dp)) { Text("Add", fontSize = 10.sp, color = NEON_GRN) }
+                Button(onClick = { if (roomCode.isNotEmpty()) roomCode = roomCode.dropLast(1) },
+                    colors = ButtonDefaults.buttonColors(backgroundColor = CARD_BG),
+                    modifier = Modifier.size(52.dp, 30.dp)) { Text("Del", fontSize = 10.sp, color = NEON_RED) }
+            }
+            Spacer(Modifier.height(4.dp))
+            if (roomCode.length >= 2) {
+                Button(onClick = { onJoin(username, roomCode) },
+                    colors = ButtonDefaults.buttonColors(backgroundColor = NEON_GRN),
+                    modifier = Modifier.fillMaxWidth(0.65f).height(32.dp)) {
+                    Text("Join!", fontSize = 12.sp, color = BG, fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text("< back", color = GRAY, fontSize = 9.sp, modifier = Modifier.clickable { step = 0 })
+        }
+    }
+}
+
+@Composable
+fun ChatLobbyScreen(
+    roomCode: String,
+    partnerOnline: Boolean,
+    partnerName: String,
+    onChat: () -> Unit,
+    onBack: () -> Unit
+) {
+    val inf = rememberInfiniteTransition()
+    val dot by inf.animateFloat(0f, 1f, infiniteRepeatable(tween(1000), RepeatMode.Reverse))
+
+    Column(
+        modifier = Modifier.fillMaxSize().background(BG).padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("WatchChat", color = NEON_BLU, fontSize = 14.sp, fontWeight = FontWeight.Black)
+        Spacer(Modifier.height(8.dp))
+        Text("Room code:", color = GRAY, fontSize = 10.sp)
+        Box(Modifier.background(CARD_BG, RoundedCornerShape(10.dp)).padding(horizontal = 14.dp, vertical = 6.dp)) {
+            Text(roomCode, color = NEON_YLW, fontSize = 22.sp, fontWeight = FontWeight.Black)
+        }
+        Spacer(Modifier.height(4.dp))
+        Text("Send to your friend", color = GRAY, fontSize = 9.sp)
+        Spacer(Modifier.height(12.dp))
+        if (partnerOnline) {
+            Text(partnerName + " joined!", color = NEON_GRN, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Button(onClick = onChat, colors = ButtonDefaults.buttonColors(backgroundColor = NEON_GRN),
+                modifier = Modifier.fillMaxWidth(0.7f).height(34.dp)) {
+                Text("Start Chat", fontSize = 12.sp, color = BG, fontWeight = FontWeight.Bold)
+            }
+        } else {
+            val dots = if (dot > 0.66f) "..." else if (dot > 0.33f) ".." else "."
+            Text("Waiting" + dots, color = NEON_ORG, fontSize = 12.sp)
+        }
+        Spacer(Modifier.height(8.dp))
+        Text("< leave", color = GRAY, fontSize = 9.sp, modifier = Modifier.clickable { onBack() })
+    }
+}
+
+@Composable
+fun ChatRoomScreen(
+    myUsername: String,
+    partnerName: String,
+    messages: List<ChatMessage>,
+    isTyping: Boolean,
+    onSend: (String) -> Unit,
+    onTyping: (Boolean) -> Unit,
+    onBack: () -> Unit
+) {
+    var showReplies by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    }
+
+    Column(modifier = Modifier.fillMaxSize().background(BG)) {
+        Row(modifier = Modifier.fillMaxWidth().background(CARD_BG).padding(horizontal = 8.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text("< ", color = NEON_BLU, fontSize = 14.sp, modifier = Modifier.clickable { onBack() })
+            Text(partnerName, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            if (isTyping) { Spacer(Modifier.width(4.dp)); Text("typing...", color = NEON_GRN, fontSize = 9.sp) }
+        }
+        LazyColumn(state = listState, modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
+            items(messages) { msg ->
+                Row(modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = if (msg.isMine) Arrangement.End else Arrangement.Start) {
+                    Box(modifier = Modifier
+                        .background(if (msg.isMine) NEON_BLU.copy(alpha = 0.25f) else CARD_BG, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp).fillMaxWidth(0.78f)) {
+                        Text(msg.content, color = if (msg.isMine) NEON_BLU else Color.White, fontSize = 11.sp,
+                            textAlign = if (msg.isMine) TextAlign.End else TextAlign.Start)
+                    }
+                }
+            }
+        }
+        if (showReplies) {
+            LazyColumn(modifier = Modifier.height(110.dp).fillMaxWidth().background(CARD_BG).padding(4.dp)) {
+                items(QUICK_REPLIES) { reply ->
+                    Text(reply, color = NEON_YLW, fontSize = 12.sp,
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable { onSend(reply); showReplies = false; onTyping(false) }
+                            .padding(vertical = 3.dp, horizontal = 8.dp))
+                }
+            }
+        }
+        Row(modifier = Modifier.fillMaxWidth().background(CARD_BG).padding(horizontal = 6.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Button(onClick = { showReplies = !showReplies; onTyping(!showReplies) },
+                colors = ButtonDefaults.buttonColors(backgroundColor = NEON_PRP),
+                modifier = Modifier.weight(1f).height(30.dp)) {
+                Text(if (showReplies) "Close" else "Reply", fontSize = 9.sp, color = Color.White)
+            }
+            Button(onClick = { onSend("(voice note)") },
+                colors = ButtonDefaults.buttonColors(backgroundColor = NEON_RED),
+                modifier = Modifier.weight(1f).height(30.dp)) {
+                Text("Voice", fontSize = 9.sp, color = Color.White)
             }
         }
     }
@@ -272,19 +563,11 @@ fun SnakeGame(onBack: () -> Unit) {
             snake.forEachIndexed { i, p ->
                 val col = if (i == 0) NEON_GRN else Color(0xFF00897B)
                 val pad = if (i == 0) 1.5f else 2.5f
-                drawRoundRect(
-                    col,
-                    Offset(p.x * cw + pad, p.y * ch + pad),
-                    Size(cw - pad * 2, ch - pad * 2),
-                    CornerRadius(4f)
-                )
+                drawRoundRect(col, Offset(p.x * cw + pad, p.y * ch + pad), Size(cw - pad * 2, ch - pad * 2), CornerRadius(4f))
             }
         }
-        Text(
-            score.toString(),
-            modifier = Modifier.align(Alignment.TopCenter).padding(top = 3.dp),
-            color = NEON_YLW, fontSize = 13.sp, fontWeight = FontWeight.Black
-        )
+        Text(score.toString(), modifier = Modifier.align(Alignment.TopCenter).padding(top = 3.dp),
+            color = NEON_YLW, fontSize = 13.sp, fontWeight = FontWeight.Black)
         Text("< back", Modifier.align(Alignment.TopStart).padding(3.dp).clickable { onBack() }, GRAY, 9.sp)
     }
 }
@@ -309,15 +592,8 @@ fun TapAttackGame(onBack: () -> Unit) {
         while (lives > 0) {
             delay(rate)
             if (targets.size < maxT) {
-                val t = TapTarget(
-                    id = nid++,
-                    x = Random.nextFloat() * 0.75f + 0.05f,
-                    y = Random.nextFloat() * 0.65f + 0.12f,
-                    size = Random.nextFloat() * 16f + 24f,
-                    color = NEON_COLORS.random(),
-                    born = System.currentTimeMillis(),
-                    life = life
-                )
+                val t = TapTarget(nid++, Random.nextFloat() * 0.75f + 0.05f, Random.nextFloat() * 0.65f + 0.12f,
+                    Random.nextFloat() * 16f + 24f, NEON_COLORS.random(), System.currentTimeMillis(), life)
                 targets = targets + t
             }
         }
@@ -353,22 +629,16 @@ fun TapAttackGame(onBack: () -> Unit) {
             val inf = rememberInfiniteTransition()
             val pulse by inf.animateFloat(1f, 1.15f, infiniteRepeatable(tween(300), RepeatMode.Reverse))
             Box(
-                Modifier
-                    .offset(x = (w * t.x) - (t.size / 2).dp, y = (h * t.y) - (t.size / 2).dp)
-                    .size(t.size.dp)
-                    .scale(pulse)
-                    .clip(CircleShape)
+                Modifier.offset(x = (w * t.x) - (t.size / 2).dp, y = (h * t.y) - (t.size / 2).dp)
+                    .size(t.size.dp).scale(pulse).clip(CircleShape)
                     .background(t.color.copy(alpha = 1f - prog * 0.6f))
                     .clickable { targets = targets.filter { it.id != t.id }; score++ }
             )
         }
-        Text(score.toString(), Modifier.align(Alignment.TopCenter).padding(top = 3.dp),
-            NEON_YLW, 15.sp, fontWeight = FontWeight.Black)
+        Text(score.toString(), Modifier.align(Alignment.TopCenter).padding(top = 3.dp), NEON_YLW, 15.sp, fontWeight = FontWeight.Black)
         val lvlText = "LV" + level.toString()
-        Text(lvlText, Modifier.align(Alignment.TopEnd).padding(top = 3.dp, end = 5.dp),
-            NEON_PRP, 9.sp, fontWeight = FontWeight.Bold)
-        Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(lvlText, Modifier.align(Alignment.TopEnd).padding(top = 3.dp, end = 5.dp), NEON_PRP, 9.sp, fontWeight = FontWeight.Bold)
+        Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 5.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
             repeat(3) { i ->
                 val heart = if (i < lives) "v" else "x"
                 Text(heart, color = if (i < lives) NEON_RED else GRAY, fontSize = 11.sp, fontWeight = FontWeight.Black)
@@ -403,23 +673,14 @@ fun BrickGame(onBack: () -> Unit) {
             if (ballY < 0.05f) velY = -velY
             if (ballY > 0.82f && ballY < 0.88f && abs(ballX - padX) < 0.15f) velY = -abs(velY)
             if (ballY > 0.95f) { alive = false; dead = true; break }
-
-            val bw = 1f / bCols
-            val bh = 0.12f
+            val bw = 1f / bCols; val bh = 0.12f
             bricks = bricks.map { (idx, isAlive) ->
-                if (!isAlive) {
-                    idx to false
-                } else {
-                    val bc = idx % bCols
-                    val br = idx / bCols
-                    val bx = bc * bw + bw / 2
-                    val by2 = 0.08f + br * bh + bh / 2
-                    if (abs(ballX - bx) < bw / 2 && abs(ballY - by2) < bh / 2) {
-                        velY = -velY; score += 10
-                        idx to false
-                    } else {
-                        idx to isAlive
-                    }
+                if (!isAlive) idx to false
+                else {
+                    val bx = (idx % bCols) * bw + bw / 2
+                    val by2 = 0.08f + (idx / bCols) * bh + bh / 2
+                    if (abs(ballX - bx) < bw / 2 && abs(ballY - by2) < bh / 2) { velY = -velY; score += 10; idx to false }
+                    else idx to isAlive
                 }
             }
             if (bricks.all { !it.second }) { won = true; alive = false }
@@ -427,8 +688,7 @@ fun BrickGame(onBack: () -> Unit) {
     }
 
     if (dead || won) {
-        val label = if (won) "Win!" else "Brick"
-        GameOverScreen(if (won) "W" else "B", label, score, NEON_BLU, onBack) {
+        GameOverScreen(if (won) "W" else "B", if (won) "Win!" else "Brick", score, NEON_BLU, onBack) {
             dead = false; won = false; alive = true; score = 0
             ballX = 0.5f; ballY = 0.7f; velX = 0.018f; velY = -0.022f; padX = 0.5f
             bricks = initBricks()
@@ -436,38 +696,23 @@ fun BrickGame(onBack: () -> Unit) {
         return
     }
 
-    BoxWithConstraints(
-        Modifier.fillMaxSize().background(BG)
-            .pointerInput(Unit) {
-                detectDragGestures { _, d -> padX = (padX + d.x / 800f).coerceIn(0.15f, 0.85f) }
-            }
-    ) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(BG).pointerInput(Unit) {
+        detectDragGestures { _, d -> padX = (padX + d.x / 800f).coerceIn(0.15f, 0.85f) }
+    }) {
         Canvas(Modifier.fillMaxSize()) {
             val sw = size.width; val sh = size.height
             val bw = 1f / bCols; val bh = 0.12f
             bricks.forEach { (idx, isAlive) ->
                 if (isAlive) {
-                    val bc = idx % bCols
-                    val br = idx / bCols
-                    val col = brickColors[br % brickColors.size]
-                    drawRoundRect(
-                        col,
-                        Offset(bc * bw * sw + 2f, 0.08f * sh + br * bh * sh + 2f),
-                        Size(bw * sw - 4f, bh * sh - 4f),
-                        CornerRadius(4f)
-                    )
+                    val col = brickColors[(idx / bCols) % brickColors.size]
+                    drawRoundRect(col, Offset((idx % bCols) * bw * sw + 2f, 0.08f * sh + (idx / bCols) * bh * sh + 2f),
+                        Size(bw * sw - 4f, bh * sh - 4f), CornerRadius(4f))
                 }
             }
             drawCircle(NEON_YLW, 8f, Offset(ballX * sw, ballY * sh))
-            drawRoundRect(
-                Color.White,
-                Offset((padX - 0.14f) * sw, 0.84f * sh),
-                Size(0.28f * sw, 10f),
-                CornerRadius(5f)
-            )
+            drawRoundRect(Color.White, Offset((padX - 0.14f) * sw, 0.84f * sh), Size(0.28f * sw, 10f), CornerRadius(5f))
         }
-        Text(score.toString(), Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp),
-            NEON_YLW, 12.sp, fontWeight = FontWeight.Black)
+        Text(score.toString(), Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp), NEON_YLW, 12.sp, fontWeight = FontWeight.Black)
         Text("< back", Modifier.align(Alignment.TopStart).padding(3.dp).clickable { onBack() }, GRAY, 9.sp)
     }
 }
@@ -491,17 +736,14 @@ fun MemoryGame(onBack: () -> Unit) {
         if (nf.size == 2) {
             canFlip = false; moves++
             if (pairs[nf[0]] == pairs[nf[1]]) {
-                matched = matched + nf[0] + nf[1]
-                flipped = listOf(); canFlip = true
+                matched = matched + nf[0] + nf[1]; flipped = listOf(); canFlip = true
                 if (matched.size == pairs.size) won = true
             }
         }
     }
 
     LaunchedEffect(flipped) {
-        if (flipped.size == 2 && !matched.containsAll(flipped)) {
-            delay(700); flipped = listOf(); canFlip = true
-        }
+        if (flipped.size == 2 && !matched.containsAll(flipped)) { delay(700); flipped = listOf(); canFlip = true }
     }
 
     if (won) {
@@ -512,15 +754,8 @@ fun MemoryGame(onBack: () -> Unit) {
     }
 
     Box(Modifier.fillMaxSize().background(BG)) {
-        Column(
-            Modifier.fillMaxSize().padding(6.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+        Column(Modifier.fillMaxSize().padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("< back", Modifier.clickable { onBack() }, GRAY, 9.sp)
                 Text("MEMORY", color = NEON_PRP, fontSize = 11.sp, fontWeight = FontWeight.Black)
                 Text(moves.toString(), color = NEON_YLW, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -540,14 +775,10 @@ fun MemoryGame(onBack: () -> Unit) {
                                 .background(
                                     if (isMatched) symColor.copy(alpha = 0.25f)
                                     else if (isFlipped) CARD_BG
-                                    else Color(0xFF1E1E3A),
-                                    RoundedCornerShape(6.dp)
-                                )
-                                .clickable { flip(idx) },
+                                    else Color(0xFF1E1E3A), RoundedCornerShape(6.dp)
+                                ).clickable { flip(idx) },
                             contentAlignment = Alignment.Center
-                        ) {
-                            if (show) Text(pairs[idx], color = symColor, fontSize = 14.sp, fontWeight = FontWeight.Black)
-                        }
+                        ) { if (show) Text(pairs[idx], color = symColor, fontSize = 14.sp, fontWeight = FontWeight.Black) }
                     }
                 }
                 Spacer(Modifier.height(4.dp))
@@ -584,13 +815,7 @@ fun ReactionGame(onBack: () -> Unit) {
             when (state) {
                 "wait"   -> state = "ready"
                 "ready"  -> state = "wait"
-                "go"     -> {
-                    val ms = System.currentTimeMillis() - startMs
-                    resultMs = ms
-                    if (ms < best) best = ms
-                    attempts++
-                    state = "result"
-                }
+                "go"     -> { val ms = System.currentTimeMillis() - startMs; resultMs = ms; if (ms < best) best = ms; attempts++; state = "result" }
                 "result" -> state = "ready"
             }
         },
@@ -618,12 +843,7 @@ fun ReactionGame(onBack: () -> Unit) {
                 Text("TAP NOW!", color = NEON_GRN, fontSize = 16.sp, fontWeight = FontWeight.Black)
             }
             "result" -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                val rating = when {
-                    resultMs < 200 -> "LIGHTNING!"
-                    resultMs < 300 -> "GREAT!"
-                    resultMs < 450 -> "good"
-                    else           -> "sleeping?"
-                }
+                val rating = when { resultMs < 200 -> "LIGHTNING!"; resultMs < 300 -> "GREAT!"; resultMs < 450 -> "good"; else -> "sleeping?" }
                 Text(rating, color = NEON_YLW, fontSize = 14.sp, fontWeight = FontWeight.Black)
                 val resStr = resultMs.toString() + "ms"
                 Text(resStr, color = NEON_YLW, fontSize = 22.sp, fontWeight = FontWeight.Black)
@@ -647,18 +867,12 @@ fun GameOverScreen(emoji: String, name: String, score: Int, color: Color, onBack
             val scoreStr = "score: " + score.toString()
             Text(scoreStr, color = NEON_YLW, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
-            Button(
-                onClick = onRestart,
-                modifier = Modifier.size(width = 100.dp, height = 34.dp),
-                colors = ButtonDefaults.buttonColors(backgroundColor = color)
-            ) {
+            Button(onClick = onRestart, modifier = Modifier.size(width = 100.dp, height = 34.dp),
+                colors = ButtonDefaults.buttonColors(backgroundColor = color)) {
                 Text("again!", color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
-            Button(
-                onClick = onBack,
-                modifier = Modifier.size(width = 100.dp, height = 30.dp),
-                colors = ButtonDefaults.buttonColors(backgroundColor = CARD_BG)
-            ) {
+            Button(onClick = onBack, modifier = Modifier.size(width = 100.dp, height = 30.dp),
+                colors = ButtonDefaults.buttonColors(backgroundColor = CARD_BG)) {
                 Text("menu", color = GRAY, fontSize = 12.sp)
             }
         }
