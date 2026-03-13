@@ -1,267 +1,332 @@
 package com.tefillin.shalom
 
-import android.graphics.BitmapFactory
 import android.os.Bundle
-import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Image
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material.*
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
+import kotlin.random.Random
 
-const val SERVER_URL = "https://whatsapp-watch-server.onrender.com"
+val BG       = Color(0xFF0A0A1A)
+val NEON_RED = Color(0xFFFF2D55)
+val NEON_BLU = Color(0xFF00E5FF)
+val NEON_GRN = Color(0xFF00FF87)
+val NEON_YLW = Color(0xFFFFE600)
+val NEON_PRP = Color(0xFFBF5AF2)
+val WHITE    = Color(0xFFFFFFFF)
+val GRAY     = Color(0xFF8E8E93)
+val GOLD     = Color(0xFFFFD700)
 
-val WA_GREEN   = Color(0xFF25D366)
-val BG_COLOR   = Color(0xFF0A0A0A)
-val CARD_COLOR = Color(0xFF1A1A1A)
-val WHITE      = Color(0xFFFFFFFF)
-val GRAY       = Color(0xFF8696A0)
+val COLORS = listOf(NEON_RED, NEON_BLU, NEON_GRN, NEON_YLW, NEON_PRP)
 
-sealed class AppScreen {
-    object Loading : AppScreen()
-    object QR : AppScreen()
-    data class Messages(val msgs: List<MsgItem>) : AppScreen()
-    data class Reply(val number: String, val name: String) : AppScreen()
+data class Target(
+    val id: Int,
+    val x: Float,
+    val y: Float,
+    val size: Float,
+    val color: Color,
+    val spawnTime: Long,
+    val lifetime: Long
+)
+
+sealed class Screen {
+    object Splash : Screen()
+    object Menu : Screen()
+    object Play : Screen()
+    data class Over(val score: Int, val best: Int) : Screen()
 }
-
-data class MsgItem(val from: String, val number: String, val body: String, val time: String)
-
-val QUICK_REPLIES = listOf("👍", "תודה!", "בסדר", "רגע", "לא עכשיו", "אתקשר אליך")
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { WhatsAppWatchApp() }
+        setContent { TapAttackApp() }
     }
-}
-
-suspend fun fetchJson(path: String): JSONObject? = withContext(Dispatchers.IO) {
-    try {
-        val url = URL("$SERVER_URL$path")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.connectTimeout = 8000
-        conn.readTimeout = 8000
-        val text = conn.inputStream.bufferedReader().readText()
-        JSONObject(text)
-    } catch (e: Exception) { null }
-}
-
-suspend fun postJson(path: String, body: JSONObject): Boolean = withContext(Dispatchers.IO) {
-    try {
-        val url = URL("$SERVER_URL$path")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.doOutput = true
-        conn.connectTimeout = 8000
-        conn.outputStream.write(body.toString().toByteArray())
-        conn.responseCode == 200
-    } catch (e: Exception) { false }
 }
 
 @Composable
-fun WhatsAppWatchApp() {
-    var screen by remember { mutableStateOf<AppScreen>(AppScreen.Loading) }
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            if (screen is AppScreen.Reply) { delay(3000); continue }
-            val status = fetchJson("/status")
-            if (status != null) {
-                if (status.optBoolean("ready", false)) {
-                    val msgs = fetchJson("/messages")
-                    val list = mutableListOf<MsgItem>()
-                    if (msgs != null) {
-                        val arr = msgs.optJSONArray("messages")
-                        if (arr != null) {
-                            for (i in 0 until arr.length()) {
-                                val m = arr.getJSONObject(i)
-                                list.add(MsgItem(
-                                    from   = m.optString("from", "?"),
-                                    number = m.optString("number", ""),
-                                    body   = m.optString("body", ""),
-                                    time   = m.optString("time", "")
-                                ))
-                            }
-                        }
-                    }
-                    screen = AppScreen.Messages(list)
-                } else {
-                    screen = AppScreen.QR
-                }
-            } else {
-                screen = AppScreen.Loading
-            }
-            delay(3000)
-        }
-    }
+fun TapAttackApp() {
+    var screen by remember { mutableStateOf<Screen>(Screen.Splash) }
+    var bestScore by remember { mutableStateOf(0) }
 
     when (val s = screen) {
-        AppScreen.Loading -> LoadingScreen()
-        AppScreen.QR      -> QRScreen()
-        is AppScreen.Messages -> MessagesScreen(s.msgs) { number, name ->
-            screen = AppScreen.Reply(number, name)
-        }
-        is AppScreen.Reply -> ReplyScreen(s.number, s.name) {
-            screen = AppScreen.Loading
-        }
+        Screen.Splash -> SplashScreen { screen = Screen.Menu }
+        Screen.Menu   -> MenuScreen { screen = Screen.Play }
+        Screen.Play   -> GameScreen(onGameOver = { score ->
+            if (score > bestScore) bestScore = score
+            screen = Screen.Over(score, bestScore)
+        })
+        is Screen.Over -> GameOverScreen(s.score, s.best) { screen = Screen.Play }
     }
 }
 
+// ===== מסך פתיחה מרהיב =====
 @Composable
-fun LoadingScreen() {
-    Box(Modifier.fillMaxSize().background(BG_COLOR), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            CircularProgressIndicator(indicatorColor = WA_GREEN, modifier = Modifier.size(32.dp))
-            Spacer(Modifier.height(8.dp))
-            Text("מתחבר לשרת...", color = GRAY, fontSize = 12.sp)
-        }
-    }
-}
+fun SplashScreen(onDone: () -> Unit) {
+    var phase by remember { mutableStateOf(0) }
 
-@Composable
-fun QRScreen() {
-    var qrBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    // אנימציות
+    val logoScale by animateFloatAsState(
+        targetValue = if (phase >= 1) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.4f, stiffness = 200f)
+    )
+    val titleAlpha by animateFloatAsState(
+        targetValue = if (phase >= 2) 1f else 0f,
+        animationSpec = tween(600)
+    )
+    val subtitleAlpha by animateFloatAsState(
+        targetValue = if (phase >= 3) 1f else 0f,
+        animationSpec = tween(800)
+    )
+    val badgeAlpha by animateFloatAsState(
+        targetValue = if (phase >= 4) 1f else 0f,
+        animationSpec = tween(600)
+    )
+
+    val infiniteTransition = rememberInfiniteTransition()
+    val glowPulse by infiniteTransition.animateFloat(
+        initialValue = 0.7f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse)
+    )
+    val rotate by infiniteTransition.animateFloat(
+        initialValue = -3f, targetValue = 3f,
+        animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Reverse)
+    )
 
     LaunchedEffect(Unit) {
-        while (qrBitmap == null) {
-            val data = fetchJson("/qr")
-            if (data != null && data.has("qr")) {
-                val base64 = data.getString("qr").removePrefix("data:image/png;base64,")
-                val bytes = Base64.decode(base64, Base64.DEFAULT)
-                qrBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            }
-            delay(2000)
-        }
+        delay(200); phase = 1
+        delay(400); phase = 2
+        delay(500); phase = 3
+        delay(600); phase = 4
+        delay(2000); onDone()
     }
 
-    Box(Modifier.fillMaxSize().background(BG_COLOR), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("סרוק עם WhatsApp", color = WA_GREEN, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(4.dp))
-            val bmp = qrBitmap
-            if (bmp != null) {
-                Image(bitmap = bmp.asImageBitmap(), contentDescription = "QR", modifier = Modifier.size(130.dp))
-            } else {
-                CircularProgressIndicator(indicatorColor = WA_GREEN, modifier = Modifier.size(40.dp))
-                Spacer(Modifier.height(4.dp))
-                Text("טוען QR...", color = GRAY, fontSize = 11.sp)
-            }
-        }
-    }
-}
-
-@Composable
-fun MessagesScreen(msgs: List<MsgItem>, onReply: (String, String) -> Unit) {
-    Box(Modifier.fillMaxSize().background(BG_COLOR)) {
-        if (msgs.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("✅", fontSize = 28.sp)
-                    Spacer(Modifier.height(8.dp))
-                    Text("מחובר!", color = WA_GREEN, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                    Text("אין הודעות חדשות", color = GRAY, fontSize = 11.sp)
-                }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                item {
-                    Text("💬 הודעות", color = WA_GREEN, fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
-                        textAlign = TextAlign.Center)
-                }
-                items(msgs) { msg ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(CARD_COLOR, shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
-                            .clickable { onReply(msg.number, msg.from) }
-                            .padding(8.dp)
-                    ) {
-                        Column {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(msg.from, color = WA_GREEN, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                Text(msg.time, color = GRAY, fontSize = 10.sp)
-                            }
-                            Spacer(Modifier.height(2.dp))
-                            Text(msg.body, color = WHITE, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Spacer(Modifier.height(4.dp))
-                            Text("לחץ להשב", color = GRAY, fontSize = 9.sp)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ReplyScreen(number: String, name: String, onDone: () -> Unit) {
-    var sent by remember { mutableStateOf(false) }
-
-    if (sent) {
-        Box(Modifier.fillMaxSize().background(BG_COLOR), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("✅", fontSize = 30.sp)
-                Text("נשלח!", color = WA_GREEN, fontSize = 14.sp)
-            }
-        }
-        LaunchedEffect(Unit) { delay(1500); onDone() }
-    } else {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            contentPadding = PaddingValues(vertical = 8.dp)
+    Box(
+        Modifier.fillMaxSize().background(BG),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            item {
-                Text("השב ל-$name", color = WA_GREEN, fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-            }
-            items(QUICK_REPLIES) { reply ->
-                Button(
-                    onClick = {
-                        sent = true
-                        val body = JSONObject().put("number", number).put("text", reply)
-                    },
-                    modifier = Modifier.fillMaxWidth().height(34.dp),
-                    colors = ButtonDefaults.buttonColors(backgroundColor = CARD_COLOR)
-                ) {
-                    Text(reply, color = WHITE, fontSize = 12.sp)
+            // לוגו ⚡ עם אנימציה
+            Text(
+                "⚡",
+                fontSize = 44.sp,
+                modifier = Modifier
+                    .scale(logoScale)
+                    .graphicsLayer { rotationZ = rotate }
+            )
+
+            Spacer(Modifier.height(6.dp))
+
+            // שם המשחק
+            Text(
+                "TAP ATTACK",
+                color = NEON_RED.copy(alpha = titleAlpha * glowPulse),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Black,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            // תג הפקה
+            Box(
+                modifier = Modifier
+                    .graphicsLayer { alpha = badgeAlpha }
+                    .background(
+                        GOLD.copy(alpha = 0.15f),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                    )
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "🏆 נוצר על ידי",
+                        color = GOLD.copy(alpha = 0.8f),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "מאסטר קוד משחקים",
+                        color = GOLD,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    Text(
+                        "בע\"מ",
+                        color = GOLD.copy(alpha = 0.7f),
+                        fontSize = 9.sp
+                    )
                 }
             }
-            item {
-                Button(onClick = onDone,
-                    modifier = Modifier.fillMaxWidth().height(34.dp),
-                    colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF333333))
-                ) {
-                    Text("ביטול", color = GRAY, fontSize = 12.sp)
-                }
+
+            Spacer(Modifier.height(8.dp))
+
+            // כוכבים
+            Text(
+                "★★★★★",
+                color = NEON_YLW.copy(alpha = subtitleAlpha),
+                fontSize = 12.sp
+            )
+        }
+    }
+}
+
+// ===== מסך תפריט =====
+@Composable
+fun MenuScreen(onStart: () -> Unit) {
+    val infiniteTransition = rememberInfiniteTransition()
+    val pulse by infiniteTransition.animateFloat(
+        initialValue = 0.95f, targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse)
+    )
+
+    Box(Modifier.fillMaxSize().background(BG), contentAlignment = Alignment.Center) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("⚡", fontSize = 36.sp, modifier = Modifier.scale(pulse))
+            Text("TAP", color = NEON_RED, fontSize = 26.sp, fontWeight = FontWeight.Black)
+            Text("ATTACK", color = NEON_BLU, fontSize = 20.sp, fontWeight = FontWeight.Black)
+            Text("לחץ מהר לפני שנעלמים!", color = GRAY, fontSize = 10.sp)
+            Spacer(Modifier.height(4.dp))
+            Button(
+                onClick = onStart,
+                modifier = Modifier.size(width = 110.dp, height = 38.dp),
+                colors = ButtonDefaults.buttonColors(backgroundColor = NEON_RED)
+            ) {
+                Text("התחל!", color = Color.Black, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+// ===== מסך משחק =====
+@Composable
+fun GameScreen(onGameOver: (Int) -> Unit) {
+    var score by remember { mutableStateOf(0) }
+    var lives by remember { mutableStateOf(3) }
+    var targets by remember { mutableStateOf(listOf<Target>()) }
+    var nextId by remember { mutableStateOf(0) }
+    var level by remember { mutableStateOf(1) }
+
+    val lifetime = maxOf(600L, 1800L - level * 120L)
+    val spawnRate = maxOf(400L, 1200L - level * 80L)
+    val maxTargets = minOf(2 + level / 2, 5)
+
+    LaunchedEffect(lives) {
+        if (lives <= 0) return@LaunchedEffect
+        while (lives > 0) {
+            delay(spawnRate)
+            if (targets.size < maxTargets) {
+                targets = targets + Target(
+                    id = nextId++,
+                    x = Random.nextFloat() * 0.75f + 0.05f,
+                    y = Random.nextFloat() * 0.70f + 0.10f,
+                    size = Random.nextFloat() * 16f + 24f,
+                    color = COLORS.random(),
+                    spawnTime = System.currentTimeMillis(),
+                    lifetime = lifetime
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(lives) {
+        if (lives <= 0) return@LaunchedEffect
+        while (lives > 0) {
+            delay(100)
+            val now = System.currentTimeMillis()
+            val expired = targets.filter { now - it.spawnTime > it.lifetime }
+            if (expired.isNotEmpty()) {
+                targets = targets - expired.toSet()
+                lives -= expired.size
+                if (lives <= 0) { onGameOver(score); break }
+            }
+        }
+    }
+
+    LaunchedEffect(score) { level = 1 + score / 5 }
+
+    BoxWithConstraints(Modifier.fillMaxSize().background(BG)) {
+        val w = maxWidth
+        val h = maxHeight
+
+        targets.forEach { target ->
+            val now = System.currentTimeMillis()
+            val progress = (now - target.spawnTime).toFloat() / target.lifetime
+            val alpha = 1f - progress * 0.6f
+
+            val inf = rememberInfiniteTransition()
+            val pulse by inf.animateFloat(
+                initialValue = 1f, targetValue = 1.15f,
+                animationSpec = infiniteRepeatable(tween(300), RepeatMode.Reverse)
+            )
+
+            Box(
+                modifier = Modifier
+                    .offset(
+                        x = (w * target.x) - (target.size / 2).dp,
+                        y = (h * target.y) - (target.size / 2).dp
+                    )
+                    .size(target.size.dp)
+                    .scale(pulse)
+                    .clip(CircleShape)
+                    .background(target.color.copy(alpha = alpha))
+                    .clickable {
+                        targets = targets.filter { it.id != target.id }
+                        score++
+                    }
+            )
+        }
+
+        Text("$score", modifier = Modifier.align(Alignment.TopCenter).padding(top = 4.dp),
+            color = NEON_YLW, fontSize = 16.sp, fontWeight = FontWeight.Black)
+
+        Row(modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            repeat(3) { i -> Text(if (i < lives) "❤️" else "🖤", fontSize = 12.sp) }
+        }
+
+        Text("LV$level", modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 6.dp),
+            color = NEON_PRP, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+// ===== מסך סיום =====
+@Composable
+fun GameOverScreen(score: Int, best: Int, onRestart: () -> Unit) {
+    Box(Modifier.fillMaxSize().background(BG), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("💥", fontSize = 32.sp)
+            Text("GAME OVER", color = NEON_RED, fontSize = 16.sp, fontWeight = FontWeight.Black)
+            Text("ניקוד: $score", color = NEON_YLW, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("שיא: $best", color = NEON_BLU, fontSize = 13.sp)
+            Spacer(Modifier.height(4.dp))
+            Button(
+                onClick = onRestart,
+                modifier = Modifier.size(width = 110.dp, height = 38.dp),
+                colors = ButtonDefaults.buttonColors(backgroundColor = NEON_GRN)
+            ) {
+                Text("שוב!", color = Color.Black, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
