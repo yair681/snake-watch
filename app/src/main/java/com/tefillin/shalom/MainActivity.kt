@@ -1,234 +1,313 @@
 package com.tefillin.shalom
 
+import android.graphics.BitmapFactory
 import android.os.Bundle
+import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material.*
 import kotlinx.coroutines.delay
-import kotlin.math.abs
-import kotlin.random.Random
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 
-// --- צבעים ---
-val BG       = Color(0xFF0A0A1A)
-val GRID_COL = Color(0xFF1A1A2E)
-val HEAD_COL = Color(0xFF00E676)
-val BODY_COL = Color(0xFF00897B)
-val FOOD_COL = Color(0xFFFF5252)
-val TEXT_COL = Color(0xFFFFFFFF)
-val SCORE_COL= Color(0xFFFFD700)
+// ⬇️ שנה לכתובת השרת שלך
+const val SERVER_URL = "https://whatsapp-watch-server.onrender.com"
 
-// --- קונסטנטות ---
-const val COLS = 14
-const val ROWS = 14
-const val TICK_MS = 200L
+val WA_GREEN  = Color(0xFF25D366)
+val WA_DARK   = Color(0xFF075E54)
+val BG_COLOR  = Color(0xFF0A0A0A)
+val CARD_COLOR= Color(0xFF1A1A1A)
+val WHITE     = Color(0xFFFFFFFF)
+val GRAY      = Color(0xFF8696A0)
 
-enum class Dir { UP, DOWN, LEFT, RIGHT }
+sealed class AppScreen {
+    object Loading : AppScreen()
+    object QR : AppScreen()
+    data class Messages(val msgs: List<MsgItem>) : AppScreen()
+    data class Reply(val number: String, val name: String) : AppScreen()
+}
 
-data class Pt(val x: Int, val y: Int)
+data class MsgItem(val from: String, val number: String, val body: String, val time: String)
 
-sealed class Screen { object Menu : Screen(); object Play : Screen(); object Over : Screen() }
+val QUICK_REPLIES = listOf("👍", "תודה!", "בסדר", "רגע", "לא עכשיו", "אתקשר אליך")
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { SnakeApp() }
+        setContent { WhatsAppWatchApp() }
     }
 }
 
-@Composable
-fun SnakeApp() {
-    var screen by remember { mutableStateOf<Screen>(Screen.Menu) }
-    var finalScore by remember { mutableStateOf(0) }
-
-    when (screen) {
-        Screen.Menu -> MenuScreen { screen = Screen.Play }
-        Screen.Play -> GameScreen(
-            onGameOver = { score ->
-                finalScore = score
-                screen = Screen.Over
-            }
-        )
-        Screen.Over -> GameOverScreen(finalScore) {
-            screen = Screen.Play
-        }
-    }
+fun fetchJson(path: String): JSONObject? {
+    return try {
+        val url = URL("$SERVER_URL$path")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.connectTimeout = 8000
+        conn.readTimeout = 8000
+        val text = conn.inputStream.bufferedReader().readText()
+        JSONObject(text)
+    } catch (e: Exception) { null }
 }
 
-// ===================== מסך תפריט =====================
-@Composable
-fun MenuScreen(onStart: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BG),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("🐍", fontSize = 36.sp)
-            Text("SNAKE", color = HEAD_COL, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("החלק להזזה", color = TEXT_COL.copy(alpha = 0.6f), fontSize = 11.sp)
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = onStart,
-                modifier = Modifier.size(width = 100.dp, height = 36.dp),
-                colors = ButtonDefaults.buttonColors(backgroundColor = HEAD_COL)
-            ) {
-                Text("שחק!", color = Color.Black, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-    }
+fun postJson(path: String, body: JSONObject): Boolean {
+    return try {
+        val url = URL("$SERVER_URL$path")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.doOutput = true
+        conn.connectTimeout = 8000
+        conn.outputStream.write(body.toString().toByteArray())
+        conn.responseCode == 200
+    } catch (e: Exception) { false }
 }
 
-// ===================== מסך משחק =====================
 @Composable
-fun GameScreen(onGameOver: (Int) -> Unit) {
-    // מצב המשחק
-    var snake by remember { mutableStateOf(listOf(Pt(7, 7), Pt(6, 7), Pt(5, 7))) }
-    var dir   by remember { mutableStateOf(Dir.RIGHT) }
-    var nextDir by remember { mutableStateOf(Dir.RIGHT) }
-    var food  by remember { mutableStateOf(Pt(10, 7)) }
-    var score by remember { mutableStateOf(0) }
-    var alive by remember { mutableStateOf(true) }
+fun WhatsAppWatchApp() {
+    var screen by remember { mutableStateOf<AppScreen>(AppScreen.Loading) }
 
-    fun spawnFood(s: List<Pt>): Pt {
-        var p: Pt
-        do { p = Pt(Random.nextInt(COLS), Random.nextInt(ROWS)) } while (s.contains(p))
-        return p
-    }
-
-    // לולאת המשחק
-    LaunchedEffect(alive) {
-        while (alive) {
-            delay(TICK_MS)
-            dir = nextDir
-            val head = snake.first()
-            val newHead = when (dir) {
-                Dir.UP    -> Pt(head.x, (head.y - 1 + ROWS) % ROWS)
-                Dir.DOWN  -> Pt(head.x, (head.y + 1) % ROWS)
-                Dir.LEFT  -> Pt((head.x - 1 + COLS) % COLS, head.y)
-                Dir.RIGHT -> Pt((head.x + 1) % COLS, head.y)
+    // לולאת בדיקה כל 3 שניות
+    LaunchedEffect(Unit) {
+        while (true) {
+            val current = screen
+            if (current is AppScreen.Reply) {
+                delay(3000)
+                continue
             }
-            // פגיעה בעצמו
-            if (snake.contains(newHead)) {
-                alive = false
-                onGameOver(score)
-                break
-            }
-            val atFood = newHead == food
-            val newSnake = if (atFood) {
-                listOf(newHead) + snake
-            } else {
-                listOf(newHead) + snake.dropLast(1)
-            }
-            if (atFood) {
-                score += 10
-                food = spawnFood(newSnake)
-            }
-            snake = newSnake
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BG)
-            .pointerInput(Unit) {
-                detectDragGestures { _, drag ->
-                    val dx = drag.x; val dy = drag.y
-                    if (abs(dx) > abs(dy)) {
-                        if (dx > 0 && dir != Dir.LEFT)  nextDir = Dir.RIGHT
-                        if (dx < 0 && dir != Dir.RIGHT) nextDir = Dir.LEFT
+            val status = fetchJson("/status")
+            if (status != null) {
+                val ready = status.optBoolean("ready", false)
+                if (ready) {
+                    val msgs = fetchJson("/messages")
+                    val list = mutableListOf<MsgItem>()
+                    if (msgs != null) {
+                        val arr = msgs.optJSONArray("messages")
+                        if (arr != null) {
+                            for (i in 0 until arr.length()) {
+                                val m = arr.getJSONObject(i)
+                                list.add(MsgItem(
+                                    from   = m.optString("from", "?"),
+                                    number = m.optString("number", ""),
+                                    body   = m.optString("body", ""),
+                                    time   = m.optString("time", "")
+                                ))
+                            }
+                        }
+                    }
+                    screen = AppScreen.Messages(list)
+                } else {
+                    val qrData = fetchJson("/qr")
+                    if (qrData != null && qrData.has("qr")) {
+                        screen = AppScreen.QR
                     } else {
-                        if (dy > 0 && dir != Dir.UP)   nextDir = Dir.DOWN
-                        if (dy < 0 && dir != Dir.DOWN) nextDir = Dir.UP
+                        screen = AppScreen.Loading
                     }
                 }
+            } else {
+                screen = AppScreen.Loading
             }
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-            val cellW = w / COLS
-            val cellH = h / ROWS
-
-            // רשת
-            for (r in 0 until ROWS) for (c in 0 until COLS) {
-                drawRect(
-                    color = if ((r + c) % 2 == 0) GRID_COL else BG,
-                    topLeft = Offset(c * cellW, r * cellH),
-                    size = Size(cellW, cellH)
-                )
-            }
-
-            // אוכל (עיגול אדום)
-            val fx = food.x * cellW + cellW / 2
-            val fy = food.y * cellH + cellH / 2
-            drawCircle(FOOD_COL, radius = cellW * 0.4f, center = Offset(fx, fy))
-
-            // נחש
-            snake.forEachIndexed { i, pt ->
-                val col = if (i == 0) HEAD_COL else BODY_COL
-                val pad = if (i == 0) 1.5f else 2.5f
-                drawRoundRect(
-                    color = col,
-                    topLeft = Offset(pt.x * cellW + pad, pt.y * cellH + pad),
-                    size = Size(cellW - pad * 2, cellH - pad * 2),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(4f)
-                )
-            }
+            delay(3000)
         }
+    }
 
-        // ניקוד
-        Text(
-            "$score",
-            modifier = Modifier.align(Alignment.TopCenter).padding(top = 4.dp),
-            color = SCORE_COL,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold
-        )
+    when (val s = screen) {
+        AppScreen.Loading -> LoadingScreen()
+        AppScreen.QR      -> QRScreen()
+        is AppScreen.Messages -> MessagesScreen(s.msgs) { number, name ->
+            screen = AppScreen.Reply(number, name)
+        }
+        is AppScreen.Reply -> ReplyScreen(s.number, s.name) {
+            screen = AppScreen.Loading
+        }
     }
 }
 
-// ===================== מסך סיום =====================
+// ===== מסך טעינה =====
 @Composable
-fun GameOverScreen(score: Int, onRestart: () -> Unit) {
+fun LoadingScreen() {
+    Box(Modifier.fillMaxSize().background(BG_COLOR), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator(indicatorColor = WA_GREEN, modifier = Modifier.size(32.dp))
+            Spacer(Modifier.height(8.dp))
+            Text("מתחבר לשרת...", color = GRAY, fontSize = 12.sp)
+        }
+    }
+}
+
+// ===== מסך QR =====
+@Composable
+fun QRScreen() {
+    var qrBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+
+    LaunchedEffect(Unit) {
+        while (qrBitmap == null) {
+            val data = fetchJson("/qr")
+            if (data != null && data.has("qr")) {
+                val base64 = data.getString("qr").removePrefix("data:image/png;base64,")
+                val bytes = Base64.decode(base64, Base64.DEFAULT)
+                qrBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }
+            delay(2000)
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(BG_COLOR), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("סרוק עם WhatsApp", color = WA_GREEN, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            val bmp = qrBitmap
+            if (bmp != null) {
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = "QR",
+                    modifier = Modifier.size(130.dp)
+                )
+            } else {
+                CircularProgressIndicator(indicatorColor = WA_GREEN, modifier = Modifier.size(40.dp))
+                Spacer(Modifier.height(4.dp))
+                Text("טוען QR...", color = GRAY, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+// ===== מסך הודעות =====
+@Composable
+fun MessagesScreen(msgs: List<MsgItem>, onReply: (String, String) -> Unit) {
+    Box(Modifier.fillMaxSize().background(BG_COLOR)) {
+        if (msgs.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("✅", fontSize = 28.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Text("מחובר!", color = WA_GREEN, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    Text("אין הודעות חדשות", color = GRAY, fontSize = 11.sp)
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(vertical = 8.dp)
+            ) {
+                item {
+                    Text(
+                        "💬 הודעות",
+                        color = WA_GREEN,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
+                items(msgs) { msg ->
+                    MessageCard(msg) { onReply(msg.number, msg.from) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MessageCard(msg: MsgItem, onReply: () -> Unit) {
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .background(BG),
-        contentAlignment = Alignment.Center
+            .fillMaxWidth()
+            .background(CARD_COLOR, shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+            .clickable { onReply() }
+            .padding(8.dp)
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text("💀", fontSize = 30.sp)
-            Text("נגמר!", color = FOOD_COL, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text("ניקוד: $score", color = SCORE_COL, fontSize = 16.sp)
-            Spacer(Modifier.height(6.dp))
-            Button(
-                onClick = onRestart,
-                modifier = Modifier.size(width = 100.dp, height = 36.dp),
-                colors = ButtonDefaults.buttonColors(backgroundColor = HEAD_COL)
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("שוב!", color = Color.Black, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text(msg.from, color = WA_GREEN, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(msg.time, color = GRAY, fontSize = 10.sp)
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                msg.body,
+                color = WHITE,
+                fontSize = 11.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(4.dp))
+            Text("לחץ להשב", color = GRAY, fontSize = 9.sp)
+        }
+    }
+}
+
+// ===== מסך תגובה =====
+@Composable
+fun ReplyScreen(number: String, name: String, onDone: () -> Unit) {
+    var sent by remember { mutableStateOf(false) }
+
+    Box(Modifier.fillMaxSize().background(BG_COLOR)) {
+        if (sent) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("✅", fontSize = 30.sp)
+                    Text("נשלח!", color = WA_GREEN, fontSize = 14.sp)
+                }
+            }
+            LaunchedEffect(Unit) { delay(1500); onDone() }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(vertical = 8.dp)
+            ) {
+                item {
+                    Text(
+                        "השב ל-$name",
+                        color = WA_GREEN,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                }
+                items(QUICK_REPLIES) { reply ->
+                    Button(
+                        onClick = {
+                            sent = true
+                            val body = JSONObject().put("number", number).put("text", reply)
+                            postJson("/reply", body)
+                        },
+                        modifier = Modifier.fillMaxWidth().height(34.dp),
+                        colors = ButtonDefaults.buttonColors(backgroundColor = CARD_COLOR)
+                    ) {
+                        Text(reply, color = WHITE, fontSize = 12.sp)
+                    }
+                }
+                item {
+                    Button(
+                        onClick = onDone,
+                        modifier = Modifier.fillMaxWidth().height(34.dp),
+                        colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF333333))
+                    ) {
+                        Text("ביטול", color = GRAY, fontSize = 12.sp)
+                    }
+                }
             }
         }
     }
